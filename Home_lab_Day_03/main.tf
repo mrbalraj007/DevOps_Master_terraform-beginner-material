@@ -114,18 +114,20 @@ resource "aws_instance" "web-server-instance" {
   ami               = "ami-085925f297f89fce1"
   instance_type     = var.ec2_instance_type
   availability_zone = "us-east-1a"
-  key_name          = "einsteinish"
+  key_name          = "MYLABKEY"
   network_interface {
     device_index         = 0
     network_interface_id = aws_network_interface.web-server-nic.id
   }
-  user_data = <<-EOF
-                #!/bin/bash
-                sudo apt update -y
-                sudo apt install apache2 -y
-                sudo systemctl start apache2
-                sudo bash -c 'echo our first web server > /var/www/html/index.html'
-                EOF
+
+  user_data       = file("install_httpd.sh")
+#   # user_data = <<-EOF
+#                 #!/bin/bash
+#                 sudo apt update -y
+#                 sudo apt install apache2 -y
+#                 sudo systemctl start apache2
+#                 sudo bash -c 'echo our first web server > /var/www/html/index.html'
+#                 EOF
   tags = {
     Name = var.ec2_instance_name
   }
