@@ -2,6 +2,10 @@ provider "aws" {
   region = var.aws_region
   
 }
+variable "aws_region" { 
+  description = "The aws region to be used for the aws account"
+  type = string
+}
 
 variable "ami_id" {
   description = "The AMI ID to use for the instance"
