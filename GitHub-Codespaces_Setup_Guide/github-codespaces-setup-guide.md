@@ -82,8 +82,11 @@ To configure your Codespace to automatically install Terraform and AWS CLI, you 
    - Navigate to your repository on GitHub
    - Click on the "Code" button (green)
    - Select the "Codespaces" tab
+
+   ![alt text](image.png)
    - Click on "Create codespace on main" (or your default branch)
    - Wait for the Codespace to be created and configured (this may take a few minutes as it installs Terraform and AWS CLI)
+   - In search bar, type 
 
 2. **Verify Installation**:
    - Once your Codespace is ready, open a new terminal (Terminal → New Terminal)
