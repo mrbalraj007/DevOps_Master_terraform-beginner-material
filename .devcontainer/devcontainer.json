@@ -1,0 +1,27 @@
+{
+    "name": "Terraform AWS Development",
+    "image": "mcr.microsoft.com/vscode/devcontainers/universal:linux",
+    "features": {
+        "terraform": {
+            "version": "latest",
+            "tflint": "latest"
+        },
+        "aws-cli": {
+            "version": "latest"
+        },
+        "git": "latest"
+    },
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "hashicorp.terraform",
+                "amazonwebservices.aws-toolkit-vscode",
+                "github.copilot"
+            ],
+            "settings": {
+                "terminal.integrated.defaultProfile.linux": "bash"
+            }
+        }
+    },
+    "postCreateCommand": "echo 'Development environment setup complete!'"
+}
