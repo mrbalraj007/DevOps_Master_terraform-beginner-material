@@ -14,12 +14,17 @@ variable "ami_id" {
 
 variable "instance_type" {
   description = "The type of instance to create"
-  type        = string
+  type        = map(string)
+  default     = {
+    dev = "t2.micro"
+    stage = "t3.micro"
+    prod = "m5.large"
+  }
 }
 
 module "ec2_instance" {
   source        = "./modules/ec2_instance"
   ami_id        = var.ami_id
-  instance_type = var.instance_type
   aws_region    = var.aws_region
+  instance_type = lookup(var.instance_type, terraform.workspace, "t2.micro")
 }
