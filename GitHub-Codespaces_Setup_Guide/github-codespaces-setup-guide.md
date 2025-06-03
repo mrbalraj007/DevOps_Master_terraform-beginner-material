@@ -3,11 +3,19 @@
 This guide provides step-by-step instructions for setting up GitHub Codespaces and configuring it to automatically install Terraform and AWS CLI.
 
 ## Table of Contents
-- [What is GitHub Codespaces?](#what-is-github-codespaces)
-- [Enabling GitHub Codespaces](#enabling-github-codespaces)
-- [Configuring Codespaces for Terraform and AWS CLI](#configuring-codespaces-for-terraform-and-aws-cli)
-- [Creating and Using Your Codespace](#creating-and-using-your-codespace)
-- [Additional Configuration and Tips](#additional-configuration-and-tips)
+- [GitHub Codespaces Setup Guide](#github-codespaces-setup-guide)
+  - [Table of Contents](#table-of-contents)
+  - [What is GitHub Codespaces?](#what-is-github-codespaces)
+  - [Enabling GitHub Codespaces](#enabling-github-codespaces)
+    - [Prerequisites](#prerequisites)
+    - [Steps to Enable Codespaces](#steps-to-enable-codespaces)
+  - [Configuring Codespaces for Terraform and AWS CLI](#configuring-codespaces-for-terraform-and-aws-cli)
+  - [Creating and Using Your Codespace](#creating-and-using-your-codespace)
+  - [Additional Configuration and Tips](#additional-configuration-and-tips)
+    - [Setting Up Environment Variables Securely](#setting-up-environment-variables-securely)
+    - [Customizing Your Codespace Further](#customizing-your-codespace-further)
+    - [Managing Codespaces](#managing-codespaces)
+  - [Conclusion](#conclusion)
 
 ## What is GitHub Codespaces?
 
@@ -86,14 +94,41 @@ To configure your Codespace to automatically install Terraform and AWS CLI, you 
    ![alt text](image.png)
    - Click on "Create codespace on main" (or your default branch)
    - Wait for the Codespace to be created and configured (this may take a few minutes as it installs Terraform and AWS CLI)
-   - In search bar, type 
+- **Install Terraform**   
+   - In search bar, type > dev and you will the following and you have to select as `dev container`
 
-2. **Verify Installation**:
+   ![alt text](image-1.png)
+   ![alt text](image-2.png)
+   ![alt text](image-3.png)
+
+click 'ok'
+ and select the latest version for all product and you will noticed that `.devcontainer` folder is created automatically and `devcontainer.json` file is also created.
+ ![alt text](image-4.png)
+
+- **Install AWS CLI**   
+     - In search bar, type > dev and you will the following and you have to select as `dev container`
+
+   ![alt text](image-1.png)
+   ![alt text](image-2.png)
+   - select `AWS CLI devcontainers`
+   ![alt text](image-5.png)
+   ![alt text](image-6.png)
+
+  - final look for devcontainers.json file
+  ![alt text](image-7.png)
+  
+  - now, in the same search bar, we will type `> rebuild` as mention in the below screenshot.
+  ![alt text](image-8.png)
+
+  - it will prompt for build 'select rebuild'
+  ![alt text](image-9.png)
+  
+1. **Verify Installation**:
    - Once your Codespace is ready, open a new terminal (Terminal → New Terminal)
    - Verify Terraform is installed: `terraform --version`
    - Verify AWS CLI is installed: `aws --version`
 
-3. **Configure AWS CLI**:
+2. **Configure AWS CLI**:
    - Configure AWS credentials: `aws configure`
    - Enter your AWS Access Key ID, Secret Access Key, default region, and output format
 
