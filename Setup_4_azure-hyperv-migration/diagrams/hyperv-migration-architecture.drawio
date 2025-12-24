@@ -1,0 +1,115 @@
+<mxfile host="Electron" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/29.0.3 Chrome/140.0.7339.249 Electron/38.7.0 Safari/537.36" version="29.0.3">
+  <diagram id="hyperv-migration-lab" name="Architecture + Workflow">
+    <mxGraphModel dx="2037" dy="1296" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="laneLocal" value="Local / CI Runner" style="swimlane;whiteSpace=wrap;html=1;rounded=0;container=1;collapsible=0;startSize=28;" parent="1" vertex="1">
+          <mxGeometry x="20" y="20" width="500" height="840" as="geometry" />
+        </mxCell>
+        <mxCell id="tfcli" value="Terraform CLI&#xa;(terraform init/plan/apply)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" parent="laneLocal" vertex="1">
+          <mxGeometry x="40" y="70" width="420" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="azurerm" value="AzureRM Provider" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" parent="laneLocal" vertex="1">
+          <mxGeometry x="40" y="160" width="420" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" style="endArrow=block;html=1;strokeColor=#666666;" parent="laneLocal" source="tfcli" target="azurerm" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="laneAzure" value="Azure" style="swimlane;whiteSpace=wrap;html=1;rounded=0;container=1;collapsible=0;startSize=28;" parent="1" vertex="1">
+          <mxGeometry x="540" y="20" width="1040" height="840" as="geometry" />
+        </mxCell>
+        <mxCell id="rgBox" value="Resource Group: rg-hyperv-migration" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;dashed=1;" parent="laneAzure" vertex="1">
+          <mxGeometry x="40" y="70" width="960" height="330" as="geometry" />
+        </mxCell>
+        <mxCell id="vnet" value="VNet: vnet-landing-zone&#xa;10.10.0.0/16" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" parent="rgBox" vertex="1">
+          <mxGeometry x="30" y="50" width="270" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="subnet" value="Subnet: subnet-workloads&#xa;10.10.1.0/24" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" parent="rgBox" vertex="1">
+          <mxGeometry x="30" y="140" width="270" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="nsg" value="NSG: nsg-hyperv&#xa;Inbound: TCP 3389 (RDP)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" parent="rgBox" vertex="1">
+          <mxGeometry x="320" y="140" width="300" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="pip" value="Public IP (Static/Standard)&#xa;pip-hyperv-host" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" parent="rgBox" vertex="1">
+          <mxGeometry x="650" y="50" width="280" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="nic" value="NIC: nic-hyperv-host" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" parent="rgBox" vertex="1">
+          <mxGeometry x="650" y="140" width="280" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="vm" value="Windows VM: vm-hyperv-host&#xa;Size: Standard_D4s_v3&#xa;OS: Windows Server (Datacenter)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" parent="rgBox" vertex="1">
+          <mxGeometry x="650" y="230" width="280" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" style="endArrow=block;html=1;strokeColor=#666666;" parent="rgBox" source="vnet" target="subnet" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" value="Associated to subnet" style="endArrow=block;html=1;strokeColor=#666666;" parent="rgBox" source="nsg" target="subnet" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" value="Attached" style="endArrow=block;html=1;strokeColor=#666666;" parent="rgBox" source="pip" target="nic" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" value="NIC" style="endArrow=block;html=1;strokeColor=#666666;" parent="rgBox" source="nic" target="vm" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="wfBox" value="Bootstrap workflow inside vm-hyperv-host" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;dashed=1;" parent="laneAzure" vertex="1">
+          <mxGeometry x="40" y="430" width="960" height="390" as="geometry" />
+        </mxCell>
+        <mxCell id="ext" value="CustomScriptExtension&#xa;Writes script to C:\Temp\install-hyperv.ps1&#xa;Executes script" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" parent="wfBox" vertex="1">
+          <mxGeometry x="30" y="60" width="420" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="ps1" value="install-hyperv.ps1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" parent="wfBox" vertex="1">
+          <mxGeometry x="30" y="170" width="420" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="task" value="Scheduled Task (Startup)&#xa;InstallHyperVPostReboot&#xa;Run as SYSTEM" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" parent="wfBox" vertex="1">
+          <mxGeometry x="480" y="60" width="420" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="reboot" value="Hyper-V install requires reboot" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" parent="wfBox" vertex="1">
+          <mxGeometry x="480" y="160" width="420" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="hypervRole" value="Hyper-V Role + Tools&#xa;(Install-WindowsFeature Hyper-V)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" parent="wfBox" vertex="1">
+          <mxGeometry x="480" y="225" width="420" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="switch" value="Create vSwitch (if missing)&#xa;InternalSwitch" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" parent="wfBox" vertex="1">
+          <mxGeometry x="30" y="260" width="420" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="vms" value="Create test VMs (if missing)&#xa;TestVM01, TestVM02" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" parent="wfBox" vertex="1">
+          <mxGeometry x="30" y="330" width="420" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="log" value="Transcript log&#xa;C:\Temp\install-hyperv.log" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;" parent="wfBox" vertex="1">
+          <mxGeometry x="480" y="300" width="420" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="e8" value="Writes &amp; runs" style="endArrow=block;html=1;strokeColor=#666666;" parent="wfBox" source="ext" target="ps1" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9" value="If Hyper-V not installed: registers" style="endArrow=block;html=1;strokeColor=#666666;" parent="wfBox" source="ps1" target="task" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e10" value="Installs role + reboot" style="endArrow=block;html=1;strokeColor=#666666;" parent="wfBox" source="ps1" target="reboot" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e11" style="endArrow=block;html=1;strokeColor=#666666;" parent="wfBox" source="reboot" target="hypervRole" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e12" value="Post-reboot: runs script again" style="endArrow=block;html=1;strokeColor=#666666;" parent="wfBox" source="task" target="ps1" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e13" value="Creates" style="endArrow=block;html=1;strokeColor=#666666;" parent="wfBox" source="ps1" target="switch" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e14" value="Creates" style="endArrow=block;html=1;strokeColor=#666666;" parent="wfBox" source="switch" target="vms" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e15" value="Writes transcript" style="endArrow=block;html=1;strokeColor=#666666;" parent="wfBox" source="ps1" target="log" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" value="Deploys extension" style="endArrow=block;html=1;strokeColor=#666666;" parent="laneAzure" source="vm" target="ext" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" value="Creates/updates" style="endArrow=block;html=1;strokeColor=#666666;" parent="1" source="azurerm" target="rgBox" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
