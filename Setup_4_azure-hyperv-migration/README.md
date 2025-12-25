@@ -124,8 +124,8 @@ Test-Path C:\Temp\install-hyperv.ps1
 
 
 
-### Step-by-Step Guide to Enable Internet Access
-1. Create a NAT Virtual Switch
+# Step-by-Step Guide to Enable Internet Access
+### 1. Create a NAT Virtual Switch
 On your Azure VM (the Hyper-V Host), you need a specific type of internal switch. Open PowerShell as Administrator and run:
 
 ```PowerShell
@@ -133,88 +133,89 @@ On your Azure VM (the Hyper-V Host), you need a specific type of internal switch
 New-VMSwitch -Name "InternalNAT" -SwitchType Internal
 ```
 
-# Create an Internal Virtual Switch
-New-VMSwitch -Name "InternalNAT" -SwitchType Internal
-2. Configure the Gateway IP
+### 2. Configure the Gateway IP
 Now, assign an IP address to the "Internal" interface you just created. This will act as the Default Gateway for your nested VMs.
 ```PowerShell
 # Assign an IP to the Virtual Switch interface
 # We will use 192.168.0.1 as the gateway
 New-NetIPAddress -IPAddress 192.168.0.1 -PrefixLength 24 -InterfaceAlias "vEthernet (InternalNAT)"
 ```
-
-# Assign an IP to the Virtual Switch interface
-# We will use 192.168.0.1 as the gateway
-New-NetIPAddress -IPAddress 192.168.0.1 -PrefixLength 24 -InterfaceAlias "vEthernet (InternalNAT)"
-3. Create the NAT Network
+### 3. Create the NAT Network
 This is the "magic" step. It tells Windows to translate traffic from the internal range to the Azure VM's external NIC.
 ```PowerShell
 # Define the NAT rule for the subnet
 New-NetNat -Name "NestedNAT" -InternalIPInterfaceAddressPrefix 192.168.0.0/24
 ```
-
-# Define the NAT rule for the subnet
-New-NetNat -Name "NestedNAT" -InternalIPInterfaceAddressPrefix 192.168.0.0/24
 4. Configure the Nested VMs
 Now that the host is ready, you must configure the network settings inside your Hyper-V VMs (Guest 1 and Guest 2):
 
-Change the Switch: In Hyper-V Manager, go to the settings of your VMs and ensure their Network Adapter is connected to the "InternalNAT" switch.
+   1.  **Change the Switch**: In Hyper-V Manager, go to the settings of your VMs and ensure their Network Adapter is connected to the "InternalNAT" switch.
 
-Assign Static IPs: Inside the Guest OS, assign IPs within the range you created:
+   2. Assign Static IPs: Inside the Guest OS, assign IPs within the range you created:
 
-IP Address: `192.168.0.10` (and `.11` for the second VM)
+      - IP Address: `192.168.0.10` (and `.11` for the second VM)
 
-Subnet Mask: `255.255.255.0`
+      - Subnet Mask: `255.255.255.0`
 
-Default Gateway: `192.168.0.1` (The IP we gave the switch)
+      - Default Gateway: `192.168.0.1` (The IP we gave the switch)
 
-DNS: Use Google DNS `(8.8.8.8)` or Azure DNS `(168.63.129.16)`.
+      - DNS: Use Google DNS `(8.8.8.8)` or Azure DNS `(168.63.129.16)`.
 
+# If copy and paste is not working then use the below
 
-In a professional Azure/Hyper-V environment, copy-pasting text and files between a host and a guest requires Enhanced Session Mode. This mode uses the Remote Desktop Protocol (RDP) over the VMBus to allow resource redirection (clipboard, drives, etc.) without needing a network connection.
+In a professional Azure/Hyper-V environment, copy-pasting text and files between a host and a guest requires **Enhanced Session Mode**. This mode uses the Remote Desktop Protocol (RDP) over the VMBus to allow resource redirection (clipboard, drives, etc.) without needing a network connection.
 
 Since you are in a nested virtualization setup (Azure VM -> Hyper-V Host -> Nested VM), there are three layers where this needs to be enabled.
 
-1. Enable Enhanced Session on the Hyper-V Host
-First, ensure the Hyper-V host (your Azure VM) is configured to allow these sessions.
+1. **Enable Enhanced Session on the Hyper-V Host**
+   - First, ensure the Hyper-V host (your Azure VM) is configured to allow these sessions.
 
-Open Hyper-V Manager.
+    - Open Hyper-V Manager.
 
-In the right-hand Actions pane, click Hyper-V Settings.
+    - In the right-hand Actions pane, click Hyper-V Settings.
 
-Under Server, select Enhanced Session Mode Policy and ensure Allow enhanced session mode is checked.
+    - Under Server, select Enhanced Session Mode Policy and ensure Allow enhanced session mode is checked.
 
-Under User, select Enhanced Session Mode and ensure Use enhanced session mode is checked.
+    - Under User, select Enhanced Session Mode and ensure Use enhanced session mode is checked.
 
-Click OK.
+    - Click OK.
 
 Alternatively, run this in an elevated PowerShell on the Azure VM:
 
-```PowerShell
-Set-VMHost -EnableEnhancedSessionMode $True
-```
-2. Enable Guest Services on the Nested VM
+  ```PowerShell
+  Set-VMHost -EnableEnhancedSessionMode $True
+  ```
+2. **Enable Guest Services on the Nested VM**
 For the specific nested VM to accept the "handshake" for file and text transfer, Guest Services must be active.
 
-Right-click your nested VM and select Settings.
+    - Right-click your nested VM and select Settings.
 
-In the left pane, under Management, select Integration Services.
+    - In the left pane, under Management, select Integration Services.
 
-Check the box for Guest services.
+    - Check the box for Guest services.
 
-Ensure Clipboard is also checked (if visible).
+    - Ensure Clipboard is also checked (if visible).
 
-Click Apply.
+    - Click Apply.
 
-3. Trigger the Connection
+3. **Trigger the Connection**
 When you click Connect to open the VM window, you should see a pop-up asking for the display resolution.
 
-Click Show Options.
+    - Click Show Options.
 
-Go to the Local Resources tab.
+    - Go to the Local Resources tab.
 
-Ensure Clipboard is checked.
+    - Ensure Clipboard is checked.
 
-Click Connect.
+    - Click Connect.
 
-Pro-Tip: If you don't see the resolution pop-up, look at the top menu bar of the VM window. There is a small icon that looks like a computer with a spark/lightning bolt—this toggles Enhanced Session. If it’s greyed out, the Guest OS hasn't fully booted yet or Integration Services aren't running.
+**Pro-Tip:** If you don't see the resolution pop-up, look at the top menu bar of the VM window. There is a small icon that looks like a computer with a spark/lightning bolt—this toggles Enhanced Session. If it’s greyed out, the Guest OS hasn't fully booted yet or Integration Services aren't running.
+
+
+**Ref Link**:
+
+- [YoutubeLink](https://www.youtube.com/watch?v=x4MMNESP6lw&list=PLJcpyd04zn7qjbnpZvN8RUt5nAqfetAea&index=15)
+
+
+40:37
+
