@@ -21,7 +21,8 @@ function Ensure-PostRebootTask {
 
     try {
         if (-not (Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue)) {
-            $action    = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$ScriptFile`""
+            $psExe     = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+            $action    = New-ScheduledTaskAction -Execute $psExe -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$ScriptFile`""
             $trigger   = New-ScheduledTaskTrigger -AtStartup
             $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
             $settings  = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
@@ -85,13 +86,31 @@ if (-not (Get-VMSwitch -Name "InternalSwitch" -ErrorAction SilentlyContinue)) {
     New-VMSwitch -Name "InternalSwitch" -SwitchType Internal | Out-Null
 }
 
-# Create test VMs if they don't exist
-if (-not (Get-VM -Name "TestVM01" -ErrorAction SilentlyContinue)) {
-    New-VM -Name "TestVM01" -MemoryStartupBytes 4GB -Generation 2 -NewVHDPath "$vmPath\TestVM01.vhdx" -NewVHDSizeBytes 60GB -SwitchName "InternalSwitch" | Out-Null
-}
+# Create test VMs if they don't exist (match expected names: TESTVM1/TESTVM2)
+$testVms = @(
+    @{ Name = "TESTVM1"; Vhd = Join-Path $vmPath "TESTVM1.vhdx" }
+    @{ Name = "TESTVM2"; Vhd = Join-Path $vmPath "TESTVM2.vhdx" }
+)
 
-if (-not (Get-VM -Name "TestVM02" -ErrorAction SilentlyContinue)) {
-    New-VM -Name "TestVM02" -MemoryStartupBytes 4GB -Generation 2 -NewVHDPath "$vmPath\TestVM02.vhdx" -NewVHDSizeBytes 60GB -SwitchName "InternalSwitch" | Out-Null
+foreach ($vm in $testVms) {
+    if (-not (Get-VM -Name $vm.Name -ErrorAction SilentlyContinue)) {
+        try {
+            New-VM -Name $vm.Name `
+                   -Path $vmPath `
+                   -MemoryStartupBytes 4GB `
+                   -Generation 2 `
+                   -NewVHDPath $vm.Vhd `
+                   -NewVHDSizeBytes 60GB `
+                   -SwitchName "InternalSwitch" `
+                   -ErrorAction Stop | Out-Null
+            Write-Host "Created VM '$($vm.Name)'."
+        } catch {
+            Write-Error "Failed to create VM '$($vm.Name)': $($_.Exception.Message)"
+            throw
+        }
+    } else {
+        Write-Host "VM '$($vm.Name)' already exists."
+    }
 }
 
 try { Stop-Transcript | Out-Null } catch {}
