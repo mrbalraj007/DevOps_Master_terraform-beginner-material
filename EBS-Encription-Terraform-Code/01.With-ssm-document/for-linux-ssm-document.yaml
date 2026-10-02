@@ -1,0 +1,701 @@
+description: |
+  EBS-Encrypt-Existing-Volumes
+  Encrypts all unencrypted EBS volumes (root and data) attached to an EC2 instance.
+  Works at the EC2/EBS API level only, so Windows and Linux behave the same.
+  Stops the instance once, replaces each volume sequentially (safety snapshot, encrypted
+  snapshot copy, encrypted replacement volume, same device name), then starts the instance
+  again only if it was originally running.
+  Original volumes and safety snapshots are never deleted, so they stay available for rollback.
+  All long waits use aws:waitForAwsResourceProperty. No boto3 calls are made in aws:executeScript.
+schemaVersion: '0.3'
+assumeRole: '{{ AutomationAssumeRole }}'
+parameters:
+  AutomationAssumeRole:
+    type: String
+    description: ARN of the IAM role (trusted by ssm.amazonaws.com) that Automation assumes.
+  InstanceId:
+    type: String
+    allowedPattern: '^i-[a-z0-9]{8,17}$'
+    description: EC2 instance ID whose unencrypted EBS volumes will be replaced.
+  KmsKeyId:
+    type: String
+    default: alias/aws/ebs
+    description: KMS key ID, ARN or alias used for the encrypted snapshots and volumes.
+  DryRun:
+    type: Boolean
+    default: true
+    description: true = report what would be done and change nothing. false = perform the encryption.
+mainSteps:
+  # ---------------------------------------------------------------------------
+  # Discovery
+  # ---------------------------------------------------------------------------
+  - name: GetInstanceInformation
+    action: aws:executeAwsApi
+    onFailure: Abort
+    nextStep: DiscoverUnencryptedVolumes
+    inputs:
+      Service: ec2
+      Api: DescribeInstances
+      InstanceIds:
+        - '{{ InstanceId }}'
+    outputs:
+      - Name: InstanceState
+        Selector: $.Reservations[0].Instances[0].State.Name
+        Type: String
+
+  - name: DiscoverUnencryptedVolumes
+    action: aws:executeAwsApi
+    onFailure: Abort
+    nextStep: SummarizePlan
+    inputs:
+      Service: ec2
+      Api: DescribeVolumes
+      Filters:
+        - Name: attachment.instance-id
+          Values:
+            - '{{ InstanceId }}'
+        - Name: encrypted
+          Values:
+            - 'false'
+    outputs:
+      - Name: Volumes
+        Selector: $.Volumes
+        Type: MapList
+
+  # Pure data processing only: no AWS API calls, no credentials needed.
+  - name: SummarizePlan
+    action: aws:executeScript
+    onFailure: Abort
+    nextStep: CheckWork
+    inputs:
+      Runtime: python3.11
+      Handler: handler
+      InputPayload:
+        InstanceId: '{{ InstanceId }}'
+        InstanceState: '{{ GetInstanceInformation.InstanceState }}'
+        Volumes: '{{ DiscoverUnencryptedVolumes.Volumes }}'
+        KmsKeyId: '{{ KmsKeyId }}'
+        DryRun: '{{ DryRun }}'
+      Script: |-
+        def handler(events, context):
+            ids = list(dict.fromkeys(
+              volume["VolumeId"]
+              for volume in events.get("Volumes") or []
+              if volume.get("VolumeId")
+            ))
+            print("==========================================")
+            print("PLAN")
+            print("==========================================")
+            print("Instance:", events["InstanceId"])
+            print("Instance state:", events["InstanceState"])
+            print("KMS key:", events["KmsKeyId"])
+            print("DryRun:", events["DryRun"])
+            print("Unencrypted volumes found:", len(ids))
+            for v in ids:
+                print("  -", v)
+            return {
+              "Count": len(ids),
+              "VolumeIds": ids or ["__NO_UNENCRYPTED_VOLUMES__"],
+            }
+    outputs:
+      - Name: Count
+        Selector: $.Payload.Count
+        Type: Integer
+      - Name: VolumeIds
+        Selector: $.Payload.VolumeIds
+        Type: StringList
+
+  - name: CheckWork
+    action: aws:branch
+    inputs:
+      Choices:
+        - NextStep: NothingToDo
+          Variable: '{{ SummarizePlan.Count }}'
+          NumericEquals: 0
+        - NextStep: DryRunComplete
+          Variable: '{{ DryRun }}'
+          BooleanEquals: true
+        - NextStep: StopInstance
+          Variable: '{{ GetInstanceInformation.InstanceState }}'
+          StringEquals: running
+        - NextStep: ProcessVolumes
+          Variable: '{{ GetInstanceInformation.InstanceState }}'
+          StringEquals: stopped
+      Default: UnsupportedInstanceState
+
+  # ---------------------------------------------------------------------------
+  # Stop once
+  # ---------------------------------------------------------------------------
+  - name: StopInstance
+    action: aws:executeAwsApi
+    onFailure: Abort
+    nextStep: WaitForInstanceStopped
+    inputs:
+      Service: ec2
+      Api: StopInstances
+      InstanceIds:
+        - '{{ InstanceId }}'
+
+  - name: WaitForInstanceStopped
+    action: aws:waitForAwsResourceProperty
+    timeoutSeconds: 3600
+    onFailure: Abort
+    nextStep: ProcessVolumes
+    inputs:
+      Service: ec2
+      Api: DescribeInstances
+      InstanceIds:
+        - '{{ InstanceId }}'
+      PropertySelector: $.Reservations[0].Instances[0].State.Name
+      DesiredValues:
+        - stopped
+
+  # ---------------------------------------------------------------------------
+  # Replace each unencrypted volume, one at a time
+  # ---------------------------------------------------------------------------
+  - name: ProcessVolumes
+    action: aws:loop
+    onFailure: Abort
+    nextStep: CheckRestart
+    inputs:
+      Iterators: '{{ SummarizePlan.VolumeIds }}'
+      IteratorDataType: String
+      MaxIterations: 30
+      Steps:
+        - name: GetVolumeInformation
+          action: aws:executeAwsApi
+          onFailure: Abort
+          nextStep: CreateSafetySnapshot
+          inputs:
+            Service: ec2
+            Api: DescribeVolumes
+            VolumeIds:
+              - '{{ ProcessVolumes.CurrentIteratorValue }}'
+          outputs:
+            - Name: VolumeType
+              Selector: $.Volumes[0].VolumeType
+              Type: String
+            - Name: Size
+              Selector: $.Volumes[0].Size
+              Type: Integer
+            - Name: AvailabilityZone
+              Selector: $.Volumes[0].AvailabilityZone
+              Type: String
+            - Name: Device
+              Selector: $.Volumes[0].Attachments[0].Device
+              Type: String
+            - Name: DeleteOnTermination
+              Selector: $.Volumes[0].Attachments[0].DeleteOnTermination
+              Type: Boolean
+
+        - name: CreateSafetySnapshot
+          action: aws:executeAwsApi
+          onFailure: Abort
+          nextStep: WaitForSafetySnapshot
+          inputs:
+            Service: ec2
+            Api: CreateSnapshot
+            VolumeId: '{{ ProcessVolumes.CurrentIteratorValue }}'
+            Description: Pre-encryption safety snapshot
+            TagSpecifications:
+              - ResourceType: snapshot
+                Tags:
+                  - Key: EBS-Encryption-Role
+                    Value: SafetySnapshot
+                  - Key: EBS-Encryption-OriginalVolume
+                    Value: '{{ ProcessVolumes.CurrentIteratorValue }}'
+          outputs:
+            - Name: SnapshotId
+              Selector: $.SnapshotId
+              Type: String
+
+        - name: WaitForSafetySnapshot
+          action: aws:waitForAwsResourceProperty
+          timeoutSeconds: 7200
+          onFailure: Abort
+          nextStep: CreateEncryptedSnapshot
+          inputs:
+            Service: ec2
+            Api: DescribeSnapshots
+            SnapshotIds:
+              - '{{ CreateSafetySnapshot.SnapshotId }}'
+            PropertySelector: $.Snapshots[0].State
+            DesiredValues:
+              - completed
+
+        - name: CreateEncryptedSnapshot
+          action: aws:executeAwsApi
+          onFailure: Abort
+          nextStep: WaitForEncryptedSnapshot
+          inputs:
+            Service: ec2
+            Api: CopySnapshot
+            SourceRegion: '{{ global:REGION }}'
+            SourceSnapshotId: '{{ CreateSafetySnapshot.SnapshotId }}'
+            Description: Encrypted copy of pre-encryption safety snapshot
+            Encrypted: true
+            KmsKeyId: '{{ KmsKeyId }}'
+            TagSpecifications:
+              - ResourceType: snapshot
+                Tags:
+                  - Key: EBS-Encryption-Role
+                    Value: EncryptedCopy
+                  - Key: EBS-Encryption-OriginalVolume
+                    Value: '{{ ProcessVolumes.CurrentIteratorValue }}'
+                  - Key: EBS-Encryption-SafetySnapshot
+                    Value: '{{ CreateSafetySnapshot.SnapshotId }}'
+          outputs:
+            - Name: EncryptedSnapshotId
+              Selector: $.SnapshotId
+              Type: String
+
+        - name: WaitForEncryptedSnapshot
+          action: aws:waitForAwsResourceProperty
+          timeoutSeconds: 7200
+          onFailure: Abort
+          nextStep: BranchOnVolumeType
+          inputs:
+            Service: ec2
+            Api: DescribeSnapshots
+            SnapshotIds:
+              - '{{ CreateEncryptedSnapshot.EncryptedSnapshotId }}'
+            PropertySelector: $.Snapshots[0].State
+            DesiredValues:
+              - completed
+
+        # IOPS and throughput are only valid for some volume types, so branch on type.
+        - name: BranchOnVolumeType
+          action: aws:branch
+          inputs:
+            Choices:
+              - NextStep: GetGp3Settings
+                Variable: '{{ GetVolumeInformation.VolumeType }}'
+                StringEquals: gp3
+              - NextStep: GetProvisionedIops
+                Variable: '{{ GetVolumeInformation.VolumeType }}'
+                StringEquals: io1
+              - NextStep: GetProvisionedIops
+                Variable: '{{ GetVolumeInformation.VolumeType }}'
+                StringEquals: io2
+            Default: CreateVolumeStandard
+
+        - name: GetGp3Settings
+          action: aws:executeAwsApi
+          onFailure: Abort
+          nextStep: CreateVolumeGp3
+          inputs:
+            Service: ec2
+            Api: DescribeVolumes
+            VolumeIds:
+              - '{{ ProcessVolumes.CurrentIteratorValue }}'
+          outputs:
+            - Name: Iops
+              Selector: $.Volumes[0].Iops
+              Type: Integer
+            - Name: Throughput
+              Selector: $.Volumes[0].Throughput
+              Type: Integer
+
+        - name: CreateVolumeGp3
+          action: aws:executeAwsApi
+          onFailure: Abort
+          nextStep: SleepAfterCreate
+          inputs:
+            Service: ec2
+            Api: CreateVolume
+            SnapshotId: '{{ CreateEncryptedSnapshot.EncryptedSnapshotId }}'
+            AvailabilityZone: '{{ GetVolumeInformation.AvailabilityZone }}'
+            Size: '{{ GetVolumeInformation.Size }}'
+            VolumeType: gp3
+            Iops: '{{ GetGp3Settings.Iops }}'
+            Throughput: '{{ GetGp3Settings.Throughput }}'
+            Encrypted: true
+            KmsKeyId: '{{ KmsKeyId }}'
+
+        - name: GetProvisionedIops
+          action: aws:executeAwsApi
+          onFailure: Abort
+          nextStep: CreateVolumeProvisioned
+          inputs:
+            Service: ec2
+            Api: DescribeVolumes
+            VolumeIds:
+              - '{{ ProcessVolumes.CurrentIteratorValue }}'
+          outputs:
+            - Name: Iops
+              Selector: $.Volumes[0].Iops
+              Type: Integer
+
+        - name: CreateVolumeProvisioned
+          action: aws:executeAwsApi
+          onFailure: Abort
+          nextStep: SleepAfterCreate
+          inputs:
+            Service: ec2
+            Api: CreateVolume
+            SnapshotId: '{{ CreateEncryptedSnapshot.EncryptedSnapshotId }}'
+            AvailabilityZone: '{{ GetVolumeInformation.AvailabilityZone }}'
+            Size: '{{ GetVolumeInformation.Size }}'
+            VolumeType: '{{ GetVolumeInformation.VolumeType }}'
+            Iops: '{{ GetProvisionedIops.Iops }}'
+            Encrypted: true
+            KmsKeyId: '{{ KmsKeyId }}'
+
+        - name: CreateVolumeStandard
+          action: aws:executeAwsApi
+          onFailure: Abort
+          nextStep: SleepAfterCreate
+          inputs:
+            Service: ec2
+            Api: CreateVolume
+            SnapshotId: '{{ CreateEncryptedSnapshot.EncryptedSnapshotId }}'
+            AvailabilityZone: '{{ GetVolumeInformation.AvailabilityZone }}'
+            Size: '{{ GetVolumeInformation.Size }}'
+            VolumeType: '{{ GetVolumeInformation.VolumeType }}'
+            Encrypted: true
+            KmsKeyId: '{{ KmsKeyId }}'
+
+        # The three create steps converge here. The new volume is found through its
+        # unique source snapshot (the encrypted copy created for this iteration).
+        - name: SleepAfterCreate
+          action: aws:sleep
+          nextStep: FindReplacementVolume
+          inputs:
+            Duration: PT10S
+
+        - name: FindReplacementVolume
+          action: aws:executeAwsApi
+          onFailure: Abort
+          nextStep: WaitForNewVolume
+          inputs:
+            Service: ec2
+            Api: DescribeVolumes
+            Filters:
+              - Name: snapshot-id
+                Values:
+                  - '{{ CreateEncryptedSnapshot.EncryptedSnapshotId }}'
+          outputs:
+            - Name: NewVolumeId
+              Selector: $.Volumes[0].VolumeId
+              Type: String
+
+        - name: WaitForNewVolume
+          action: aws:waitForAwsResourceProperty
+          timeoutSeconds: 7200
+          onFailure: Abort
+          nextStep: GetOriginalTags
+          inputs:
+            Service: ec2
+            Api: DescribeVolumes
+            VolumeIds:
+              - '{{ FindReplacementVolume.NewVolumeId }}'
+            PropertySelector: $.Volumes[0].State
+            DesiredValues:
+              - available
+
+        - name: GetOriginalTags
+          action: aws:executeAwsApi
+          onFailure: Abort
+          nextStep: BuildTagList
+          inputs:
+            Service: ec2
+            Api: DescribeTags
+            Filters:
+              - Name: resource-id
+                Values:
+                  - '{{ ProcessVolumes.CurrentIteratorValue }}'
+          outputs:
+            - Name: Tags
+              Selector: $.Tags
+              Type: MapList
+
+        # Pure data processing: drops reserved aws: tags (CreateTags rejects them),
+        # adds the relationship tags with the real snapshot ID.
+        - name: BuildTagList
+          action: aws:executeScript
+          onFailure: Abort
+          nextStep: CopyTagsToNewVolume
+          inputs:
+            Runtime: python3.11
+            Handler: handler
+            InputPayload:
+              Tags: '{{ GetOriginalTags.Tags }}'
+              OriginalVolume: '{{ ProcessVolumes.CurrentIteratorValue }}'
+              SafetySnapshot: '{{ CreateSafetySnapshot.SnapshotId }}'
+              NewVolume: '{{ FindReplacementVolume.NewVolumeId }}'
+            Script: |-
+              def handler(events, context):
+                  reserved = {
+                      "EBS-Encryption-Replacement": "true",
+                      "EBS-Encryption-OriginalVolume": events["OriginalVolume"],
+                      "EBS-Encryption-SafetySnapshot": events["SafetySnapshot"],
+                      "EBS-Encryption-ReplacementVolume": events["NewVolume"],
+                  }
+                  tags = []
+                  for t in events.get("Tags") or []:
+                      key = t.get("Key")
+                      if not key or key.startswith("aws:") or key in reserved:
+                          continue
+                      tags.append({"Key": key, "Value": t.get("Value", "")})
+                  for k, v in reserved.items():
+                      tags.append({"Key": k, "Value": v})
+                  print("Tags for new volume:", tags)
+                  return {"Tags": tags}
+          outputs:
+            - Name: Tags
+              Selector: $.Payload.Tags
+              Type: MapList
+
+        - name: CopyTagsToNewVolume
+          action: aws:executeAwsApi
+          onFailure: Abort
+          nextStep: TagOriginalVolume
+          inputs:
+            Service: ec2
+            Api: CreateTags
+            Resources:
+              - '{{ FindReplacementVolume.NewVolumeId }}'
+            Tags: '{{ BuildTagList.Tags }}'
+
+        - name: TagOriginalVolume
+          action: aws:executeAwsApi
+          onFailure: Abort
+          nextStep: DetachOriginalVolume
+          inputs:
+            Service: ec2
+            Api: CreateTags
+            Resources:
+              - '{{ ProcessVolumes.CurrentIteratorValue }}'
+            Tags:
+              - Key: EBS-Encryption-ReplacedByVolume
+                Value: '{{ FindReplacementVolume.NewVolumeId }}'
+              - Key: EBS-Encryption-SafetySnapshot
+                Value: '{{ CreateSafetySnapshot.SnapshotId }}'
+
+        - name: DetachOriginalVolume
+          action: aws:executeAwsApi
+          onFailure: Abort
+          nextStep: WaitForOriginalDetached
+          inputs:
+            Service: ec2
+            Api: DetachVolume
+            VolumeId: '{{ ProcessVolumes.CurrentIteratorValue }}'
+            InstanceId: '{{ InstanceId }}'
+
+        - name: WaitForOriginalDetached
+          action: aws:waitForAwsResourceProperty
+          timeoutSeconds: 3600
+          onFailure: Abort
+          nextStep: AttachEncryptedVolume
+          inputs:
+            Service: ec2
+            Api: DescribeVolumes
+            VolumeIds:
+              - '{{ ProcessVolumes.CurrentIteratorValue }}'
+            PropertySelector: $.Volumes[0].State
+            DesiredValues:
+              - available
+
+        - name: AttachEncryptedVolume
+          action: aws:executeAwsApi
+          onFailure: Abort
+          nextStep: WaitForEncryptedVolumeInUse
+          inputs:
+            Service: ec2
+            Api: AttachVolume
+            Device: '{{ GetVolumeInformation.Device }}'
+            InstanceId: '{{ InstanceId }}'
+            VolumeId: '{{ FindReplacementVolume.NewVolumeId }}'
+
+        - name: WaitForEncryptedVolumeInUse
+          action: aws:waitForAwsResourceProperty
+          timeoutSeconds: 3600
+          onFailure: Abort
+          nextStep: WaitForAttachmentAttached
+          inputs:
+            Service: ec2
+            Api: DescribeVolumes
+            VolumeIds:
+              - '{{ FindReplacementVolume.NewVolumeId }}'
+            PropertySelector: $.Volumes[0].State
+            DesiredValues:
+              - in-use
+
+        - name: WaitForAttachmentAttached
+          action: aws:waitForAwsResourceProperty
+          timeoutSeconds: 3600
+          onFailure: Abort
+          nextStep: ValidateEncryption
+          inputs:
+            Service: ec2
+            Api: DescribeVolumes
+            VolumeIds:
+              - '{{ FindReplacementVolume.NewVolumeId }}'
+            PropertySelector: $.Volumes[0].Attachments[0].State
+            DesiredValues:
+              - attached
+
+        - name: ValidateEncryption
+          action: aws:assertAwsResourceProperty
+          onFailure: Abort
+          nextStep: RestoreDeleteOnTermination
+          inputs:
+            Service: ec2
+            Api: DescribeVolumes
+            VolumeIds:
+              - '{{ FindReplacementVolume.NewVolumeId }}'
+            PropertySelector: $.Volumes[0].Encrypted
+            DesiredValues:
+              - 'True'
+
+        - name: RestoreDeleteOnTermination
+          action: aws:executeAwsApi
+          onFailure: Abort
+          nextStep: ValidateDeviceMapping
+          inputs:
+            Service: ec2
+            Api: ModifyInstanceAttribute
+            InstanceId: '{{ InstanceId }}'
+            BlockDeviceMappings:
+              - DeviceName: '{{ GetVolumeInformation.Device }}'
+                Ebs:
+                  DeleteOnTermination: '{{ GetVolumeInformation.DeleteOnTermination }}'
+
+        - name: ValidateDeviceMapping
+          action: aws:assertAwsResourceProperty
+          onFailure: Abort
+          isEnd: true
+          inputs:
+            Service: ec2
+            Api: DescribeVolumes
+            VolumeIds:
+              - '{{ FindReplacementVolume.NewVolumeId }}'
+            PropertySelector: $.Volumes[0].Attachments[0].Device
+            DesiredValues:
+              - '{{ GetVolumeInformation.Device }}'
+
+  # ---------------------------------------------------------------------------
+  # Restore original power state
+  # ---------------------------------------------------------------------------
+  - name: CheckRestart
+    action: aws:branch
+    inputs:
+      Choices:
+        - NextStep: StartInstance
+          Variable: '{{ GetInstanceInformation.InstanceState }}'
+          StringEquals: running
+      Default: FinalCheck
+
+  - name: StartInstance
+    action: aws:executeAwsApi
+    onFailure: Abort
+    nextStep: WaitForInstanceRunning
+    inputs:
+      Service: ec2
+      Api: StartInstances
+      InstanceIds:
+        - '{{ InstanceId }}'
+
+  - name: WaitForInstanceRunning
+    action: aws:waitForAwsResourceProperty
+    timeoutSeconds: 3600
+    onFailure: Abort
+    nextStep: FinalCheck
+    inputs:
+      Service: ec2
+      Api: DescribeInstances
+      InstanceIds:
+        - '{{ InstanceId }}'
+      PropertySelector: $.Reservations[0].Instances[0].State.Name
+      DesiredValues:
+        - running
+
+  - name: FinalCheck
+    action: aws:executeAwsApi
+    onFailure: Abort
+    nextStep: VerifyAllEncrypted
+    inputs:
+      Service: ec2
+      Api: DescribeVolumes
+      Filters:
+        - Name: attachment.instance-id
+          Values:
+            - '{{ InstanceId }}'
+        - Name: encrypted
+          Values:
+            - 'false'
+    outputs:
+      - Name: RemainingVolumes
+        Selector: $.Volumes
+        Type: MapList
+
+  - name: VerifyAllEncrypted
+    action: aws:executeScript
+    onFailure: Abort
+    isEnd: true
+    inputs:
+      Runtime: python3.11
+      Handler: handler
+      InputPayload:
+        InstanceId: '{{ InstanceId }}'
+        RemainingVolumes: '{{ FinalCheck.RemainingVolumes }}'
+      Script: |-
+        def handler(events, context):
+          remaining = [
+            volume.get("VolumeId", "unknown")
+            for volume in events.get("RemainingVolumes") or []
+          ]
+            if remaining:
+              raise Exception("Unencrypted volumes still attached: " + ", ".join(remaining))
+            print("All volumes attached to", events["InstanceId"], "are encrypted.")
+            print("Original volumes and safety snapshots were kept. Find them with the")
+            print("tags EBS-Encryption-ReplacedByVolume / EBS-Encryption-SafetySnapshot.")
+            return {"Status": "COMPLETED"}
+
+  # ---------------------------------------------------------------------------
+  # Terminal branches (reached only through CheckWork)
+  # ---------------------------------------------------------------------------
+  - name: NothingToDo
+    action: aws:executeScript
+    isEnd: true
+    inputs:
+      Runtime: python3.11
+      Handler: handler
+      InputPayload:
+        InstanceId: '{{ InstanceId }}'
+      Script: |-
+        def handler(events, context):
+            print("No unencrypted volumes attached to", events["InstanceId"], "- nothing to do.")
+            return {"Status": "NOTHING_TO_DO"}
+
+  - name: DryRunComplete
+    action: aws:executeScript
+    isEnd: true
+    inputs:
+      Runtime: python3.11
+      Handler: handler
+      InputPayload:
+        InstanceId: '{{ InstanceId }}'
+        VolumeIds: '{{ SummarizePlan.VolumeIds }}'
+      Script: |-
+        def handler(events, context):
+            print("DRY RUN - no changes were made.")
+            print("Volumes that would be replaced on", events["InstanceId"], ":")
+            for v in events.get("VolumeIds") or []:
+                print("  -", v)
+            return {"Status": "DRY_RUN"}
+
+  - name: UnsupportedInstanceState
+    action: aws:executeScript
+    isEnd: true
+    inputs:
+      Runtime: python3.11
+      Handler: handler
+      InputPayload:
+        InstanceState: '{{ GetInstanceInformation.InstanceState }}'
+      Script: |-
+        def handler(events, context):
+            raise Exception(
+                "Instance state is '" + events["InstanceState"]
+                + "'. It must be 'running' or 'stopped' to start. Wait for it to settle and re-run."
+            )
