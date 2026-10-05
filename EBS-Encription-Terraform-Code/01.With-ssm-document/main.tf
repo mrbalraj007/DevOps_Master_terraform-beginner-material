@@ -153,26 +153,26 @@ resource "aws_iam_role_policy_attachment" "ssm_ebs_encryption_policy_attachment"
 # ============================================================
 
 resource "aws_ssm_document" "ebs_encryption" {
-  name            = "BS-WIN-EBS-Encription-Windows"
+  name            = "JQ-WIN-EBS-Encription-Windows"
   document_type   = "Automation"
   document_format = "YAML"
   content         = file("${path.module}/for-windows-ssm-document.yaml")
 
   tags = merge(var.tags, {
-    Name      = "BS-WIN-EBS-Encription-Windows"
+    Name      = "JQ-WIN-EBS-Encription-Windows"
     ManagedBy = "Terraform"
     Purpose   = "EBS-Encryption-Automation"
   })
 }
 
 resource "aws_ssm_document" "ebs_encryption_linux" {
-  name            = "BS-LIN-EBS-Encription-Linux"
+  name            = "JQ-LIN-EBS-Encription-Linux"
   document_type   = "Automation"
   document_format = "YAML"
   content         = file("${path.module}/for-linux-ssm-document.yaml")
 
   tags = merge(var.tags, {
-    Name      = "BS-LIN-EBS-Encription-Linux"
+    Name      = "JQ-LIN-EBS-Encription-Linux"
     ManagedBy = "Terraform"
     Purpose   = "EBS-Encryption-Automation"
   })

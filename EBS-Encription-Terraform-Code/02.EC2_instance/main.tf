@@ -1,4 +1,13 @@
 # Fetch the latest Ubuntu 26.04 LTS AMI
+locals {
+  ebs_volume_tags = {
+    createdby   = "BSINGH"
+    TechOwner   = "Singh Balraj"
+    Infra       = "IT"
+    Environment = "Non-Prod"
+  }
+}
+
 data "aws_ami" "ubuntu" {
   most_recent = true
 
@@ -93,12 +102,67 @@ resource "aws_instance" "windows_2025" {
   }
 }
 
+locals {
+  ubuntu_volume_ids = merge(
+    {
+      root = aws_instance.ubuntu-svr[0].root_block_device[0].volume_id
+    },
+    {
+      for device in aws_instance.ubuntu-svr[0].ebs_block_device :
+      device.device_name => device.volume_id
+    }
+  )
+  windows_volume_ids = merge(
+    {
+      root = aws_instance.windows_2025.root_block_device[0].volume_id
+    },
+    {
+      for device in aws_instance.windows_2025.ebs_block_device :
+      device.device_name => device.volume_id
+    }
+  )
+}
+
+resource "aws_ec2_tag" "ubuntu_ebs_volume" {
+  for_each = {
+    for pair in setproduct(
+      keys(local.ubuntu_volume_ids),
+      keys(merge(local.ebs_volume_tags, { Name = "ubuntu-1" }))
+    ) : "${pair[0]}:${pair[1]}" => {
+      resource_id = local.ubuntu_volume_ids[pair[0]]
+      key         = pair[1]
+      value       = lookup(merge(local.ebs_volume_tags, { Name = "ubuntu-1" }), pair[1])
+    }
+  }
+
+  resource_id = each.value.resource_id
+  key         = each.value.key
+  value       = each.value.value
+}
+
+resource "aws_ec2_tag" "windows_ebs_volume" {
+  for_each = {
+    for pair in setproduct(
+      keys(local.windows_volume_ids),
+      keys(merge(local.ebs_volume_tags, { Name = "Windows-2025" }))
+    ) : "${pair[0]}:${pair[1]}" => {
+      resource_id = local.windows_volume_ids[pair[0]]
+      key         = pair[1]
+      value       = lookup(merge(local.ebs_volume_tags, { Name = "Windows-2025" }), pair[1])
+    }
+  }
+
+  resource_id = each.value.resource_id
+  key         = each.value.key
+  value       = each.value.value
+}
+
 resource "aws_security_group" "ubuntu-VM-SG" {
   name        = "ubuntu-SG"
   description = "Allow inbound traffic"
 
   dynamic "ingress" {
-    for_each = toset([25, 22, 80, 443, 3389, 6443, 465, 8080, 9000, 3000])
+    for_each = toset([22, 3389])  #25, 22, 80, 443, 3389, 6443, 465, 8080, 9000, 3000
     content {
       description = "inbound rule for port ${ingress.value}"
       from_port   = ingress.value
@@ -108,13 +172,13 @@ resource "aws_security_group" "ubuntu-VM-SG" {
     }
   }
 
-  ingress {
-    description = "Custom TCP Port Range"
-    from_port   = 2000
-    to_port     = 11000
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+#  ingress {
+#    description = "Custom TCP Port Range"
+#    from_port   = 2000
+#    to_port     = 11000
+#    protocol    = "tcp"
+#    cidr_blocks = ["0.0.0.0/0"]
+#  }
 
   egress {
     from_port   = 0

@@ -104,6 +104,70 @@ The documents appear under AWS Systems Manager > Documents in the configured AWS
 
 ## Important notes
 
+**SSM Document workflow for Windows.**
+```
+EC2 Instance
+    |
+    v
+Discover attached EBS volumes
+    |
+    v
+Any unencrypted volumes?
+    |
+    +---- NO ----> EXIT
+    |
+   YES
+    |
+    v
+Stop EC2
+    |
+    v
+For each unencrypted EBS volume:
+    |
+    +--> Capture original configuration
+    |
+    +--> Create safety snapshot
+    |
+    +--> Wait for snapshot completion
+    |
+    +--> Copy snapshot with encryption
+    |
+    +--> Wait for encrypted snapshot
+    |
+    +--> Create encrypted EBS volume
+    |
+    +--> Wait for volume available
+    |
+    +--> Copy tags
+    |
+    +--> Detach original unencrypted volume
+    |
+    +--> Attach new encrypted volume
+    |        to same device
+    |
+    +--> Restore DeleteOnTermination
+    |
+    +--> Validate encryption + attachment
+    |
+    v
+All volumes complete
+    |
+    v
+Was EC2 originally running?
+    |
+    +---- YES ----> Start EC2
+    |
+    +---- NO -----> Leave EC2 stopped
+    |
+    v
+COMPLETE
+
+Original volumes  ---> RETAINED FOR ROLLBACK
+Safety snapshots  ---> RETAINED FOR RECOVERY
+```
+
+
+
 - The automation is designed for controlled maintenance windows and should be used only when the instance can be restored safely.
 - Retained original volumes and safety snapshots are kept intentionally for rollback and review.
 - If a document is updated or the Terraform code changes, run `terraform plan` and `terraform apply` again to make the AWS-managed document match the configuration in this repo.

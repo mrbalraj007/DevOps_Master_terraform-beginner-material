@@ -641,12 +641,12 @@ mainSteps:
         RemainingVolumes: '{{ FinalCheck.RemainingVolumes }}'
       Script: |-
         def handler(events, context):
-          remaining = [
-            volume.get("VolumeId", "unknown")
-            for volume in events.get("RemainingVolumes") or []
-          ]
+            remaining = [
+                volume.get("VolumeId", "unknown")
+                for volume in events.get("RemainingVolumes") or []
+            ]
             if remaining:
-              raise Exception("Unencrypted volumes still attached: " + ", ".join(remaining))
+                raise Exception("Unencrypted volumes still attached: " + ", ".join(remaining))
             print("All volumes attached to", events["InstanceId"], "are encrypted.")
             print("Original volumes and safety snapshots were kept. Find them with the")
             print("tags EBS-Encryption-ReplacedByVolume / EBS-Encryption-SafetySnapshot.")
