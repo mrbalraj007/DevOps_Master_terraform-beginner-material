@@ -22,13 +22,3 @@ output "ssm_ebs_encryption_document_arn" {
   description = "ARN of the Windows SSM EBS encryption Automation document"
   value       = aws_ssm_document.ebs_encryption.arn
 }
-
-output "ssm_linux_ebs_encryption_document_name" {
-  description = "Name of the Linux SSM EBS encryption Automation document"
-  value       = aws_ssm_document.ebs_encryption_linux.name
-}
-
-output "ssm_linux_ebs_encryption_document_arn" {
-  description = "ARN of the Linux SSM EBS encryption Automation document"
-  value       = aws_ssm_document.ebs_encryption_linux.arn
-}

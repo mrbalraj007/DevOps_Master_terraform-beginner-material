@@ -1,16 +1,11 @@
-terraform {
-  required_version = ">= 1.5.0"
+data "aws_caller_identity" "current" {}
 
-  required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = ">= 5.0"
-    }
+
+check "correct_aws_account" {
+  assert {
+    condition     = data.aws_caller_identity.current.account_id == var.account_id
+    error_message = "ERROR: Logged into the wrong AWS account!"
   }
-}
-
-provider "aws" {
-  region = var.aws_region
 }
 
 # ============================================================
@@ -153,26 +148,13 @@ resource "aws_iam_role_policy_attachment" "ssm_ebs_encryption_policy_attachment"
 # ============================================================
 
 resource "aws_ssm_document" "ebs_encryption" {
-  name            = "JQ-WIN-EBS-Encription-Windows"
+  name            = "JQ-EBS-Encription"
   document_type   = "Automation"
   document_format = "YAML"
-  content         = file("${path.module}/for-windows-ssm-document.yaml")
+  content         = file("${path.module}/ssm/ebs-encryption.yaml")
 
   tags = merge(var.tags, {
-    Name      = "JQ-WIN-EBS-Encription-Windows"
-    ManagedBy = "Terraform"
-    Purpose   = "EBS-Encryption-Automation"
-  })
-}
-
-resource "aws_ssm_document" "ebs_encryption_linux" {
-  name            = "JQ-LIN-EBS-Encription-Linux"
-  document_type   = "Automation"
-  document_format = "YAML"
-  content         = file("${path.module}/for-linux-ssm-document.yaml")
-
-  tags = merge(var.tags, {
-    Name      = "JQ-LIN-EBS-Encription-Linux"
+    Name      = "JQ-EBS-Encription"
     ManagedBy = "Terraform"
     Purpose   = "EBS-Encryption-Automation"
   })

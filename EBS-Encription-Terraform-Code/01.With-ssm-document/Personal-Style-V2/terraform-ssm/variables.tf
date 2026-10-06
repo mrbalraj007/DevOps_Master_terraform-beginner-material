@@ -3,6 +3,16 @@ variable "aws_region" {
   type        = string
 }
 
+variable "account_name" {
+  description = "AWS Account Name"
+  type        = string
+}
+
+variable "account_id" {
+  description = "AWS Account ID"
+  type        = string
+}
+
 variable "kms_key_arn" {
   description = "Customer managed KMS key ARN used for EBS encryption"
   type        = string
@@ -25,3 +35,5 @@ variable "tags" {
 
   default = {}
 }
+
+

@@ -128,7 +128,7 @@ resource "aws_ec2_tag" "ubuntu_ebs_volume" {
     for pair in setproduct(
       keys(local.ubuntu_volume_ids),
       keys(merge(local.ebs_volume_tags, { Name = "ubuntu-1" }))
-    ) : "${pair[0]}:${pair[1]}" => {
+      ) : "${pair[0]}:${pair[1]}" => {
       resource_id = local.ubuntu_volume_ids[pair[0]]
       key         = pair[1]
       value       = lookup(merge(local.ebs_volume_tags, { Name = "ubuntu-1" }), pair[1])
@@ -145,7 +145,7 @@ resource "aws_ec2_tag" "windows_ebs_volume" {
     for pair in setproduct(
       keys(local.windows_volume_ids),
       keys(merge(local.ebs_volume_tags, { Name = "Windows-2025" }))
-    ) : "${pair[0]}:${pair[1]}" => {
+      ) : "${pair[0]}:${pair[1]}" => {
       resource_id = local.windows_volume_ids[pair[0]]
       key         = pair[1]
       value       = lookup(merge(local.ebs_volume_tags, { Name = "Windows-2025" }), pair[1])
@@ -162,7 +162,7 @@ resource "aws_security_group" "ubuntu-VM-SG" {
   description = "Allow inbound traffic"
 
   dynamic "ingress" {
-    for_each = toset([22, 3389])  #25, 22, 80, 443, 3389, 6443, 465, 8080, 9000, 3000
+    for_each = toset([22, 3389]) #25, 22, 80, 443, 3389, 6443, 465, 8080, 9000, 3000
     content {
       description = "inbound rule for port ${ingress.value}"
       from_port   = ingress.value
@@ -172,13 +172,13 @@ resource "aws_security_group" "ubuntu-VM-SG" {
     }
   }
 
-#  ingress {
-#    description = "Custom TCP Port Range"
-#    from_port   = 2000
-#    to_port     = 11000
-#    protocol    = "tcp"
-#    cidr_blocks = ["0.0.0.0/0"]
-#  }
+  #  ingress {
+  #    description = "Custom TCP Port Range"
+  #    from_port   = 2000
+  #    to_port     = 11000
+  #    protocol    = "tcp"
+  #    cidr_blocks = ["0.0.0.0/0"]
+  #  }
 
   egress {
     from_port   = 0

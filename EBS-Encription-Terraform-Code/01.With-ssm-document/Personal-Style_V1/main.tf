@@ -1,5 +1,5 @@
 terraform {
-  required_version = ">= 1.5.0"
+  required_version = ">= 1.15.0"
 
   required_providers {
     aws = {
@@ -153,26 +153,13 @@ resource "aws_iam_role_policy_attachment" "ssm_ebs_encryption_policy_attachment"
 # ============================================================
 
 resource "aws_ssm_document" "ebs_encryption" {
-  name            = "JQ-WIN-EBS-Encription-Windows"
+  name            = "JQ-EBS-Encription"
   document_type   = "Automation"
   document_format = "YAML"
   content         = file("${path.module}/for-windows-ssm-document.yaml")
 
   tags = merge(var.tags, {
-    Name      = "JQ-WIN-EBS-Encription-Windows"
-    ManagedBy = "Terraform"
-    Purpose   = "EBS-Encryption-Automation"
-  })
-}
-
-resource "aws_ssm_document" "ebs_encryption_linux" {
-  name            = "JQ-LIN-EBS-Encription-Linux"
-  document_type   = "Automation"
-  document_format = "YAML"
-  content         = file("${path.module}/for-linux-ssm-document.yaml")
-
-  tags = merge(var.tags, {
-    Name      = "JQ-LIN-EBS-Encription-Linux"
+    Name      = "JQ-EBS-Encription"
     ManagedBy = "Terraform"
     Purpose   = "EBS-Encryption-Automation"
   })

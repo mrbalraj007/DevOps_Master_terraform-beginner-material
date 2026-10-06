@@ -1,0 +1,935 @@
+schemaVersion: '0.3'
+assumeRole: '{{ AutomationAssumeRole }}'
+description: |
+  Encrypt existing unencrypted EBS volumes attached to one EC2 instance.
+  Optimized for lower Systems Manager Automation step count while preserving
+  safety snapshots, encrypted replacements, tags, DeleteOnTermination,
+  validation, and rollback of a failed volume swap.
+parameters:
+  AutomationAssumeRole:
+    type: String
+    description: ARN of the IAM role trusted by ssm.amazonaws.com.
+  InstanceId:
+    type: String
+    description: EC2 instance ID.
+  KmsKeyId:
+    type: String
+    description: |
+      Optional KMS key ID, ARN, or alias for the encrypted snapshot copy.
+      Leave empty to use the Region/account default EBS KMS key.
+    default: ''
+  DryRun:
+    type: Boolean
+    description: |
+      If true, only reports unencrypted volumes. No changes are made.
+    default: true
+  SnapshotTimeoutSeconds:
+    type: Integer
+    description: Maximum time to wait for a snapshot operation.
+    default: 7200
+  VolumeTimeoutSeconds:
+    type: Integer
+    description: Maximum time to wait for a volume state transition.
+    default: 7200
+mainSteps:
+  - name: DiscoverVolumes
+    action: aws:executeScript
+    timeoutSeconds: 60
+    nextStep: CheckDryRun
+    isEnd: false
+    onFailure: Abort
+    inputs:
+      Runtime: python3.11
+      Handler: handler
+      Script: |-
+        import boto3
+
+        def handler(events, context):
+            ec2 = boto3.client("ec2")
+            instance_id = events["InstanceId"]
+
+            response = ec2.describe_instances(InstanceIds=[instance_id])
+            reservations = response.get("Reservations", [])
+            if not reservations or not reservations[0].get("Instances"):
+                raise Exception(f"Instance {instance_id} was not found")
+
+            instance = reservations[0]["Instances"][0]
+            state = instance["State"]["Name"]
+
+            if state not in ("running", "stopped"):
+                raise Exception(
+                    f"Instance {instance_id} is in unsupported state '{state}'. "
+                    "Only running or stopped instances are supported."
+                )
+
+            volume_ids = []
+            report_lines = []
+
+            for mapping in instance.get("BlockDeviceMappings", []):
+                ebs = mapping.get("Ebs")
+                if not ebs:
+                    continue
+                volume_id = ebs.get("VolumeId")
+                if volume_id:
+                    volume_ids.append(volume_id)
+
+            if not volume_ids:
+                return {
+                    "OriginalState": state,
+                    "NeedsEncryption": False,
+                    "VolumeIds": [],
+                    "Report": "No EBS volumes were found."
+                }
+
+            volumes = ec2.describe_volumes(VolumeIds=volume_ids)["Volumes"]
+            unencrypted = []
+
+            for volume in volumes:
+                volume_id = volume["VolumeId"]
+                encrypted = bool(volume.get("Encrypted", False))
+                status = "ENCRYPTED" if encrypted else "UNENCRYPTED"
+                report_lines.append(
+                    f"{volume_id} | {status} | "
+                    f"{volume.get('VolumeType')} | {volume.get('Size')} GiB | "
+                    f"{volume.get('AvailabilityZone')}"
+                )
+                if not encrypted:
+                    unencrypted.append(volume_id)
+
+            return {
+                "OriginalState": state,
+                "NeedsEncryption": bool(unencrypted),
+                "VolumeIds": unencrypted,
+                "Report": "\n".join(report_lines)
+            }
+      InputPayload:
+        InstanceId: '{{ InstanceId }}'
+    outputs:
+      - Name: OriginalState
+        Selector: $.Payload.OriginalState
+        Type: String
+      - Name: NeedsEncryption
+        Selector: $.Payload.NeedsEncryption
+        Type: Boolean
+      - Name: VolumeIds
+        Selector: $.Payload.VolumeIds
+        Type: StringList
+      - Name: Report
+        Selector: $.Payload.Report
+        Type: String
+
+  - name: CheckDryRun
+    action: aws:branch
+    inputs:
+      Choices:
+        - NextStep: DryRunComplete
+          Variable: '{{ DryRun }}'
+          BooleanEquals: true
+      Default: CheckNeedsEncryption
+
+  - name: DryRunComplete
+    action: aws:executeScript
+    timeoutSeconds: 30
+    isEnd: true
+    onFailure: Abort
+    inputs:
+      Runtime: python3.11
+      Handler: handler
+      Script: |-
+        def handler(events, context):
+            return {
+                "Message": "DRY RUN - No changes were made.\n\n"
+                           + events.get("Report", "")
+            }
+      InputPayload:
+        Report: '{{ DiscoverVolumes.Report }}'
+    outputs:
+      - Name: Message
+        Selector: $.Payload.Message
+        Type: String
+
+  - name: CheckNeedsEncryption
+    action: aws:branch
+    inputs:
+      Choices:
+        - NextStep: CheckOriginalState
+          Variable: '{{ DiscoverVolumes.NeedsEncryption }}'
+          BooleanEquals: true
+      Default: NothingToDo
+
+  - name: NothingToDo
+    action: aws:executeScript
+    timeoutSeconds: 30
+    isEnd: true
+    onFailure: Abort
+    inputs:
+      Runtime: python3.11
+      Handler: handler
+      Script: |-
+        def handler(events, context):
+            return {"Message": "All attached EBS volumes are already encrypted."}
+      InputPayload: {}
+    outputs:
+      - Name: Message
+        Selector: $.Payload.Message
+        Type: String
+
+  - name: CheckOriginalState
+    action: aws:branch
+    inputs:
+      Choices:
+        - NextStep: StopInstance
+          Variable: '{{ DiscoverVolumes.OriginalState }}'
+          StringEquals: running
+        - NextStep: ProcessVolumes
+          Variable: '{{ DiscoverVolumes.OriginalState }}'
+          StringEquals: stopped
+      Default: UnsupportedInstanceState
+
+  - name: UnsupportedInstanceState
+    action: aws:executeScript
+    timeoutSeconds: 30
+    isEnd: true
+    onFailure: Abort
+    inputs:
+      Runtime: python3.11
+      Handler: handler
+      Script: |-
+        def handler(events, context):
+            raise Exception("Unsupported EC2 instance state.")
+      InputPayload: {}
+
+  - name: StopInstance
+    action: aws:changeInstanceState
+    maxAttempts: 2
+    timeoutSeconds: 3600
+    nextStep: ProcessVolumes
+    isEnd: false
+    onFailure: Abort
+    inputs:
+      InstanceIds:
+        - '{{ InstanceId }}'
+      DesiredState: stopped
+      CheckStateOnly: false
+      Force: false
+
+  - name: ProcessVolumes
+    action: aws:loop
+    nextStep: RestoreOriginalInstanceState
+    isEnd: false
+    onFailure: step:RestoreOriginalInstanceState
+    inputs:
+      Iterators: '{{ DiscoverVolumes.VolumeIds }}'
+      IteratorDataType: String
+      MaxIterations: 100
+      Steps:
+        - name: PrepareVolumeAndSafetySnapshot
+          action: aws:executeScript
+          timeoutSeconds: 120
+          nextStep: WaitForSafetySnapshot
+          isEnd: false
+          onFailure: Abort
+          inputs:
+            Runtime: python3.11
+            Handler: handler
+            Script: |-
+              import boto3
+
+              def handler(events, context):
+                  ec2 = boto3.client("ec2")
+                  instance_id = events["InstanceId"]
+                  volume_id = events["VolumeId"]
+
+                  volume = ec2.describe_volumes(
+                      VolumeIds=[volume_id]
+                  )["Volumes"][0]
+
+                  instance = ec2.describe_instances(
+                      InstanceIds=[instance_id]
+                  )["Reservations"][0]["Instances"][0]
+
+                  device = None
+                  delete_on_termination = False
+
+                  for mapping in instance.get("BlockDeviceMappings", []):
+                      ebs = mapping.get("Ebs")
+                      if ebs and ebs.get("VolumeId") == volume_id:
+                          device = mapping.get("DeviceName")
+                          delete_on_termination = ebs.get(
+                              "DeleteOnTermination", False
+                          )
+                          break
+
+                  if not device:
+                      raise Exception(
+                          f"Volume {volume_id} is not attached to {instance_id}"
+                      )
+
+                  tags = volume.get("Tags", [])
+                  management_tags = [
+                      {"Key": "EBS-Encryption-OriginalVolume", "Value": volume_id}
+                  ]
+
+                  snapshot_response = ec2.create_snapshot(
+                      VolumeId=volume_id,
+                      Description=(
+                          "EBS encryption safety snapshot - "
+                          + volume_id
+                      ),
+                      TagSpecifications=[
+                          {
+                              "ResourceType": "snapshot",
+                              "Tags": management_tags
+                          }
+                      ]
+                  )
+
+                  return {
+                      "VolumeId": volume_id,
+                      "Device": device,
+                      "DeleteOnTermination": delete_on_termination,
+                      "VolumeType": volume.get("VolumeType"),
+                      "Size": volume.get("Size"),
+                      "Iops": volume.get("Iops", 0),
+                      "Throughput": volume.get("Throughput", 0),
+                      "AvailabilityZone": volume.get("AvailabilityZone"),
+                      "OriginalTags": tags,
+                      "SafetySnapshotId": snapshot_response["SnapshotId"]
+                  }
+            InputPayload:
+              InstanceId: '{{ InstanceId }}'
+              VolumeId: '{{ ProcessVolumes.CurrentIteratorValue }}'
+          outputs:
+            - Name: VolumeId
+              Selector: $.Payload.VolumeId
+              Type: String
+            - Name: Device
+              Selector: $.Payload.Device
+              Type: String
+            - Name: DeleteOnTermination
+              Selector: $.Payload.DeleteOnTermination
+              Type: Boolean
+            - Name: VolumeType
+              Selector: $.Payload.VolumeType
+              Type: String
+            - Name: Size
+              Selector: $.Payload.Size
+              Type: Integer
+            - Name: Iops
+              Selector: $.Payload.Iops
+              Type: Integer
+            - Name: Throughput
+              Selector: $.Payload.Throughput
+              Type: Integer
+            - Name: AvailabilityZone
+              Selector: $.Payload.AvailabilityZone
+              Type: String
+            - Name: SafetySnapshotId
+              Selector: $.Payload.SafetySnapshotId
+              Type: String
+
+        - name: WaitForSafetySnapshot
+          action: aws:waitForAwsResourceProperty
+          timeoutSeconds: 7200
+          nextStep: CreateEncryptedSnapshot
+          isEnd: false
+          onFailure: Abort
+          inputs:
+            Service: ec2
+            Api: DescribeSnapshots
+            SnapshotIds:
+              - '{{ PrepareVolumeAndSafetySnapshot.SafetySnapshotId }}'
+            PropertySelector: $.Snapshots[0].State
+            DesiredValues:
+              - completed
+
+        - name: CreateEncryptedSnapshot
+          action: aws:executeScript
+          timeoutSeconds: 60
+          nextStep: WaitForEncryptedSnapshot
+          isEnd: false
+          onFailure: Abort
+          inputs:
+            Runtime: python3.11
+            Handler: handler
+            Script: |-
+              import boto3
+
+              def handler(events, context):
+                  ec2 = boto3.client("ec2")
+                  kwargs = {
+                      "SourceRegion": events["Region"],
+                      "SourceSnapshotId": events["SafetySnapshotId"],
+                      "Encrypted": True,
+                      "Description": (
+                          "Encrypted EBS snapshot for "
+                          + events["OriginalVolume"]
+                      )
+                  }
+
+                  kms_key_id = events.get("KmsKeyId", "")
+                  if kms_key_id:
+                      kwargs["KmsKeyId"] = kms_key_id
+
+                  response = ec2.copy_snapshot(**kwargs)
+
+                  return {
+                      "EncryptedSnapshotId": response["SnapshotId"]
+                  }
+            InputPayload:
+              Region: '{{ global:REGION }}'
+              SafetySnapshotId: '{{ PrepareVolumeAndSafetySnapshot.SafetySnapshotId }}'
+              OriginalVolume: '{{ PrepareVolumeAndSafetySnapshot.VolumeId }}'
+              KmsKeyId: '{{ KmsKeyId }}'
+          outputs:
+            - Name: EncryptedSnapshotId
+              Selector: $.Payload.EncryptedSnapshotId
+              Type: String
+
+        - name: WaitForEncryptedSnapshot
+          action: aws:waitForAwsResourceProperty
+          timeoutSeconds: 7200
+          nextStep: CreateEncryptedVolumeAndTags
+          isEnd: false
+          onFailure: Abort
+          inputs:
+            Service: ec2
+            Api: DescribeSnapshots
+            SnapshotIds:
+              - '{{ CreateEncryptedSnapshot.EncryptedSnapshotId }}'
+            PropertySelector: $.Snapshots[0].State
+            DesiredValues:
+              - completed
+
+        - name: CreateEncryptedVolumeAndTags
+          action: aws:executeScript
+          timeoutSeconds: 60
+          nextStep: WaitForEncryptedVolume
+          isEnd: false
+          onFailure: Abort
+          inputs:
+            Runtime: python3.11
+            Handler: handler
+            Script: |-
+              import boto3
+
+              def handler(events, context):
+                  ec2 = boto3.client("ec2")
+                  original = events["OriginalVolume"]
+                  replacement = events["ReplacementSnapshot"]
+
+                  original_tags = ec2.describe_volumes(
+                      VolumeIds=[original]
+                  )["Volumes"][0].get("Tags", [])
+
+                  tags = []
+
+                  for tag in original_tags:
+                      key = tag.get("Key", "")
+                      if key.startswith("aws:"):
+                          continue
+                      if key not in (
+                          "EBS-Encryption-OriginalVolume",
+                          "EBS-Encryption-SafetySnapshot",
+                          "EBS-Encryption-ReplacementVolume"
+                      ):
+                          tags.append({
+                              "Key": key,
+                              "Value": tag.get("Value", "")
+                          })
+
+                  tags.extend([
+                      {
+                          "Key": "EBS-Encryption-OriginalVolume",
+                          "Value": original
+                      },
+                      {
+                          "Key": "EBS-Encryption-SafetySnapshot",
+                          "Value": events["SafetySnapshotId"]
+                      }
+                  ])
+
+                  volume_type = events["VolumeType"]
+                  create_kwargs = {
+                      "AvailabilityZone": events["AvailabilityZone"],
+                      "SnapshotId": replacement,
+                      "Encrypted": True,
+                      "VolumeType": volume_type,
+                      "TagSpecifications": [
+                          {
+                              "ResourceType": "volume",
+                              "Tags": tags
+                          }
+                      ]
+                  }
+
+                  iops = int(events.get("Iops", 0) or 0)
+                  throughput = int(events.get("Throughput", 0) or 0)
+
+                  if volume_type in ("io1", "io2", "gp3") and iops > 0:
+                      create_kwargs["Iops"] = iops
+
+                  if volume_type == "gp3" and throughput > 0:
+                      create_kwargs["Throughput"] = throughput
+
+                  response = ec2.create_volume(**create_kwargs)
+                  return {"NewVolumeId": response["VolumeId"]}
+            InputPayload:
+              OriginalVolume: '{{ PrepareVolumeAndSafetySnapshot.VolumeId }}'
+              ReplacementSnapshot: '{{ CreateEncryptedSnapshot.EncryptedSnapshotId }}'
+              SafetySnapshotId: '{{ PrepareVolumeAndSafetySnapshot.SafetySnapshotId }}'
+              VolumeType: '{{ PrepareVolumeAndSafetySnapshot.VolumeType }}'
+              Iops: '{{ PrepareVolumeAndSafetySnapshot.Iops }}'
+              Throughput: '{{ PrepareVolumeAndSafetySnapshot.Throughput }}'
+              AvailabilityZone: '{{ PrepareVolumeAndSafetySnapshot.AvailabilityZone }}'
+          outputs:
+            - Name: NewVolumeId
+              Selector: $.Payload.NewVolumeId
+              Type: String
+
+        - name: WaitForEncryptedVolume
+          action: aws:waitForAwsResourceProperty
+          timeoutSeconds: 7200
+          nextStep: SwapAndValidate
+          isEnd: false
+          onFailure: Abort
+          inputs:
+            Service: ec2
+            Api: DescribeVolumes
+            VolumeIds:
+              - '{{ CreateEncryptedVolumeAndTags.NewVolumeId }}'
+            PropertySelector: $.Volumes[0].State
+            DesiredValues:
+              - available
+
+        - name: SwapAndValidate
+          action: aws:executeScript
+          timeoutSeconds: 600
+          onFailure: Abort
+          inputs:
+            Runtime: python3.11
+            Handler: handler
+            Script: |-
+              import boto3
+              import time
+
+              POLL_SECONDS = 5
+              MAX_WAIT_SECONDS = 300
+
+              def describe_volume(ec2, volume_id):
+                  response = ec2.describe_volumes(VolumeIds=[volume_id])
+                  volumes = response.get("Volumes", [])
+                  if not volumes:
+                      raise Exception(f"Volume {volume_id} was not found")
+                  return volumes[0]
+
+              def get_attachment(ec2, volume_id, instance_id=None):
+                  volume = describe_volume(ec2, volume_id)
+                  for attachment in volume.get("Attachments", []):
+                      if instance_id is None or attachment.get("InstanceId") == instance_id:
+                          return attachment
+                  return None
+
+              def get_volume_on_device(ec2, instance_id, device):
+                  response = ec2.describe_volumes(
+                      Filters=[
+                          {
+                              "Name": "attachment.instance-id",
+                              "Values": [instance_id]
+                          },
+                          {
+                              "Name": "attachment.device",
+                              "Values": [device]
+                          }
+                      ]
+                  )
+                  volumes = response.get("Volumes", [])
+                  if not volumes:
+                      return None
+                  return volumes[0]["VolumeId"]
+
+              def wait_for_volume_state(ec2, volume_id, desired_state):
+                  deadline = time.time() + MAX_WAIT_SECONDS
+                  last_state = None
+
+                  while time.time() < deadline:
+                      volume = describe_volume(ec2, volume_id)
+                      last_state = volume.get("State")
+
+                      if last_state == desired_state:
+                          return
+
+                      if last_state == "error":
+                          raise Exception(
+                              f"Volume {volume_id} entered error state"
+                          )
+
+                      time.sleep(POLL_SECONDS)
+
+                  raise TimeoutError(
+                      f"Timed out waiting for volume {volume_id} to become "
+                      f"{desired_state}; last state was {last_state}"
+                  )
+
+              def wait_for_detached(ec2, volume_id, instance_id):
+                  deadline = time.time() + MAX_WAIT_SECONDS
+                  last_attachment = None
+
+                  while time.time() < deadline:
+                      attachment = get_attachment(ec2, volume_id, instance_id)
+                      last_attachment = attachment
+
+                      if attachment is None:
+                          return
+
+                      time.sleep(POLL_SECONDS)
+
+                  raise TimeoutError(
+                      f"Timed out waiting for {volume_id} to detach from "
+                      f"{instance_id}; attachment={last_attachment}"
+                  )
+
+              def wait_for_attached(ec2, volume_id, instance_id, device):
+                  deadline = time.time() + MAX_WAIT_SECONDS
+                  last_attachment = None
+
+                  while time.time() < deadline:
+                      attachment = get_attachment(ec2, volume_id, instance_id)
+                      last_attachment = attachment
+
+                      if attachment:
+                          attachment_state = attachment.get("State")
+                          attachment_device = attachment.get("Device")
+
+                          if (
+                              attachment_state == "attached"
+                              and attachment_device == device
+                          ):
+                              return
+
+                      time.sleep(POLL_SECONDS)
+
+                  raise TimeoutError(
+                      f"Timed out waiting for {volume_id} to attach to "
+                      f"{instance_id} at {device}; attachment={last_attachment}"
+                  )
+
+              def wait_for_device_free(ec2, instance_id, device):
+                  deadline = time.time() + MAX_WAIT_SECONDS
+                  last_volume = None
+
+                  while time.time() < deadline:
+                      last_volume = get_volume_on_device(
+                          ec2, instance_id, device
+                      )
+
+                      if last_volume is None:
+                          return
+
+                      time.sleep(POLL_SECONDS)
+
+                  raise TimeoutError(
+                      f"Timed out waiting for device {device} on {instance_id} "
+                      f"to become free; current volume={last_volume}"
+                  )
+
+              def detach_if_attached(ec2, volume_id, instance_id):
+                  attachment = get_attachment(ec2, volume_id, instance_id)
+
+                  if not attachment:
+                      return
+
+                  ec2.detach_volume(
+                      VolumeId=volume_id,
+                      InstanceId=instance_id,
+                      Force=False
+                  )
+
+                  wait_for_detached(ec2, volume_id, instance_id)
+                  wait_for_volume_state(ec2, volume_id, "available")
+
+              def attach_and_validate(ec2, volume_id, instance_id, device):
+                  # Do not rely on describe_instances().BlockDeviceMappings here.
+                  # During EC2/EBS propagation it can temporarily contain an
+                  # attachment with Ebs.VolumeId=None.
+                  wait_for_device_free(ec2, instance_id, device)
+
+                  ec2.attach_volume(
+                      VolumeId=volume_id,
+                      InstanceId=instance_id,
+                      Device=device
+                  )
+
+                  wait_for_attached(
+                      ec2,
+                      volume_id,
+                      instance_id,
+                      device
+                  )
+
+              def handler(events, context):
+                  ec2 = boto3.client("ec2")
+
+                  instance_id = events["InstanceId"]
+                  original = events["OriginalVolume"]
+                  replacement = events["ReplacementVolume"]
+                  device = events["Device"]
+                  delete_on_termination = events["DeleteOnTermination"]
+                  safety_snapshot = events["SafetySnapshotId"]
+
+                  try:
+                      # 1. Detach original volume.
+                      detach_if_attached(
+                          ec2,
+                          original,
+                          instance_id
+                      )
+
+                      # 2. Attach replacement using the original EC2
+                      #    DeviceName. Validate using the volume's Attachments
+                      #    object, not the instance block-device mapping.
+                      attach_and_validate(
+                          ec2,
+                          replacement,
+                          instance_id,
+                          device
+                      )
+
+                      # 3. Verify encryption before changing
+                      #    DeleteOnTermination.
+                      replacement_volume = describe_volume(
+                          ec2,
+                          replacement
+                      )
+
+                      if not replacement_volume.get("Encrypted", False):
+                          raise Exception(
+                              f"Replacement volume {replacement} is not encrypted"
+                          )
+
+                      # 4. Restore DeleteOnTermination.
+                      ec2.modify_instance_attribute(
+                          InstanceId=instance_id,
+                          BlockDeviceMappings=[
+                              {
+                                  "DeviceName": device,
+                                  "Ebs": {
+                                      "DeleteOnTermination":
+                                          bool(delete_on_termination)
+                                  }
+                              }
+                          ]
+                      )
+
+                      # 5. Preserve audit tags on the original volume and
+                      #    replacement volume.
+                      ec2.create_tags(
+                          Resources=[original],
+                          Tags=[
+                              {
+                                  "Key": "EBS-Encryption-ReplacementVolume",
+                                  "Value": replacement
+                              },
+                              {
+                                  "Key": "EBS-Encryption-SafetySnapshot",
+                                  "Value": safety_snapshot
+                              }
+                          ]
+                      )
+
+                      ec2.create_tags(
+                          Resources=[replacement],
+                          Tags=[
+                              {
+                                  "Key": "EBS-Encryption-OriginalVolume",
+                                  "Value": original
+                              },
+                              {
+                                  "Key": "EBS-Encryption-SafetySnapshot",
+                                  "Value": safety_snapshot
+                              },
+                              {
+                                  "Key": "EBS-Encryption-ReplacementVolume",
+                                  "Value": replacement
+                              }
+                          ]
+                      )
+
+                      # 6. Final attachment validation from the authoritative
+                      #    EBS Attachments data.
+                      attachment = get_attachment(
+                          ec2,
+                          replacement,
+                          instance_id
+                      )
+
+                      if not attachment:
+                          raise Exception(
+                              f"Replacement {replacement} is not attached to "
+                              f"{instance_id}"
+                          )
+
+                      if attachment.get("State") != "attached":
+                          raise Exception(
+                              f"Replacement {replacement} attachment state is "
+                              f"{attachment.get('State')}, expected attached"
+                          )
+
+                      if attachment.get("Device") != device:
+                          raise Exception(
+                              f"Replacement {replacement} is attached at "
+                              f"{attachment.get('Device')}, expected {device}"
+                          )
+
+                      return {
+                          "Status": "SUCCESS",
+                          "OriginalVolume": original,
+                          "ReplacementVolume": replacement,
+                          "Device": device,
+                          "Encrypted": True
+                      }
+
+                  except Exception as error:
+                      rollback_error = None
+
+                      try:
+                          # IMPORTANT: Never use describe_instances().
+                          # BlockDeviceMappings to decide whether the
+                          # replacement is attached. Use DescribeVolumes
+                          # Attachments instead.
+                          replacement_attachment = get_attachment(
+                              ec2,
+                              replacement,
+                              instance_id
+                          )
+
+                          if replacement_attachment:
+                              detach_if_attached(
+                                  ec2,
+                                  replacement,
+                                  instance_id
+                              )
+
+                          # Make sure the requested device name is actually
+                          # free before reconnecting the original volume.
+                          wait_for_device_free(
+                              ec2,
+                              instance_id,
+                              device
+                          )
+
+                          # If the original is already attached correctly,
+                          # rollback is already complete.
+                          original_attachment = get_attachment(
+                              ec2,
+                              original,
+                              instance_id
+                          )
+
+                          if not (
+                              original_attachment
+                              and
+                              original_attachment.get("State") == "attached"
+                              and
+                              original_attachment.get("Device") == device
+                          ):
+                              attach_and_validate(
+                                  ec2,
+                                  original,
+                                  instance_id,
+                                  device
+                              )
+
+                              ec2.modify_instance_attribute(
+                                  InstanceId=instance_id,
+                                  BlockDeviceMappings=[
+                                      {
+                                          "DeviceName": device,
+                                          "Ebs": {
+                                              "DeleteOnTermination":
+                                                  bool(delete_on_termination)
+                                          }
+                                      }
+                                  ]
+                              )
+
+                          # Confirm original is really back on the instance.
+                          final_original_attachment = get_attachment(
+                              ec2,
+                              original,
+                              instance_id
+                          )
+
+                          if not final_original_attachment:
+                              raise Exception(
+                                  f"Original volume {original} could not be "
+                                  "confirmed after rollback"
+                              )
+
+                      except Exception as rb_error:
+                          rollback_error = str(rb_error)
+
+                      message = (
+                          f"Replacement failed for {original}: {error}. "
+                          "Original volume rollback was attempted."
+                      )
+
+                      if rollback_error:
+                          message += (
+                              f" ROLLBACK ERROR: {rollback_error}. "
+                              "Manual recovery is required."
+                          )
+
+                      raise Exception(message)
+            InputPayload:
+              InstanceId: '{{ InstanceId }}'
+              OriginalVolume: '{{ PrepareVolumeAndSafetySnapshot.VolumeId }}'
+              ReplacementVolume: '{{ CreateEncryptedVolumeAndTags.NewVolumeId }}'
+              Device: '{{ PrepareVolumeAndSafetySnapshot.Device }}'
+              DeleteOnTermination: '{{ PrepareVolumeAndSafetySnapshot.DeleteOnTermination }}'
+              SafetySnapshotId: '{{ PrepareVolumeAndSafetySnapshot.SafetySnapshotId }}'
+
+  - name: RestoreOriginalInstanceState
+    action: aws:branch
+    inputs:
+      Choices:
+        - NextStep: StartInstance
+          Variable: '{{ DiscoverVolumes.OriginalState }}'
+          StringEquals: running
+      Default: EncryptionComplete
+
+  - name: StartInstance
+    action: aws:changeInstanceState
+    maxAttempts: 2
+    timeoutSeconds: 3600
+    nextStep: EncryptionComplete
+    isEnd: false
+    onFailure: Abort
+    inputs:
+      InstanceIds:
+        - '{{ InstanceId }}'
+      DesiredState: running
+      CheckStateOnly: false
+      FailOnUnexpectedStopped: true
+
+  - name: EncryptionComplete
+    action: aws:executeScript
+    timeoutSeconds: 30
+    isEnd: true
+    onFailure: Abort
+    inputs:
+      Runtime: python3.11
+      Handler: handler
+      Script: |-
+        def handler(events, context):
+            return {
+                "Message":
+                    "EBS encryption replacement completed successfully. "
+                    "Original volumes and safety snapshots were retained "
+                    "for rollback/recovery."
+            }
+      InputPayload: {}
+    outputs:
+      - Name: Message
+        Selector: $.Payload.Message
+        Type: String

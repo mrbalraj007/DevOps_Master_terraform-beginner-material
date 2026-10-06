@@ -1,4 +1,4 @@
-aws_region = "ap-southeast-2" # us-east-1
+aws_region = "us-east-1" # us-east-1
 
 
 # Update your KMS key
